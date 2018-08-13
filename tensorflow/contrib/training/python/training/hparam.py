@@ -34,13 +34,13 @@ from tensorflow.python.util import deprecation
 # where <rhs> is either a single token or [] enclosed list of tokens.
 # For example:  "var[1] = a" or "x = [1,2,3]"
 PARAM_RE = re.compile(r"""
-  (?P<name>[a-zA-Z][\w]*)      # variable name: "var" or "x"
+  (?P<name>[a-zA-Z][\w\.]*)      # variable name: "var" or "x"
   (\[\s*(?P<index>\d+)\s*\])?  # (optional) index: "1" or None
   \s*=\s*
   ((?P<val>[^,\[]*)            # single value: "a" or None
    |
    \[(?P<vals>[^\]]*)\])       # list of values: None or "1,2,3"
-  ($|,)""", re.VERBOSE)
+  ($|,\s*)""", re.VERBOSE)
 
 
 def _parse_fail(name, var_type, value, values):
@@ -200,6 +200,13 @@ def parse_values(values, type_map):
   If a hyperparameter name in both an index assignment and scalar assignment,
   a ValueError is raised.  (e.g. 'a=[1,2,3],a[0] = 1').
 
+  The hyperparameter name may contain '.' symbols, which will result in an
+  attribute name that is only accessible through the getattr and setattr
+  functions.  (And must be first explicit added through add_hparam.)
+
+  WARNING: Use of '.' in your variable names is allowed, but is not well
+  supported and not recommended.
+
   The `value` in `name=value` must follows the syntax according to the
   type of the parameter:
 
@@ -315,7 +322,7 @@ class HParams(object):
 
   Hyperparameters have type, which is inferred from the type of their value
   passed at construction type.   The currently supported types are: integer,
-  float, string, and list of integer, float, or string.
+  float, boolean, string, and list of integer, float, boolean, or string.
 
   You can override hyperparameter values by calling the
   [`parse()`](#HParams.parse) method, passing a string of comma separated
@@ -357,6 +364,8 @@ class HParams(object):
     hparams.parse_json('{"learning_rate": 0.3, "activations": "relu"}')
   ```
   """
+
+  _HAS_DYNAMIC_ATTRIBUTES = True  # Required for pytype checks.
 
   def __init__(self, hparam_def=None, model_structure=None, **kwargs):
     """Create an instance of `HParams` from keyword arguments.
@@ -500,6 +509,16 @@ class HParams(object):
             'Must pass a list for multi-valued parameter: %s.' % name)
       setattr(self, name, _cast_to_type_if_compatible(name, param_type, value))
 
+  def del_hparam(self, name):
+    """Removes the hyperparameter with key 'name'.
+
+    Args:
+      name: Name of the hyperparameter.
+    """
+    if hasattr(self, name):
+      delattr(self, name)
+      del self._hparam_types[name]
+
   def parse(self, values):
     """Override hyperparameter values, parsing new values from a string.
 
@@ -550,13 +569,26 @@ class HParams(object):
   def get_model_structure(self):
     return self._model_structure
 
-  def to_json(self):
+  def to_json(self, indent=None, separators=None, sort_keys=False):
     """Serializes the hyperparameters into JSON.
+
+    Args:
+      indent: If a non-negative integer, JSON array elements and object members
+        will be pretty-printed with that indent level. An indent level of 0, or
+        negative, will only insert newlines. `None` (the default) selects the
+        most compact representation.
+      separators: Optional `(item_separator, key_separator)` tuple. Default is
+        `(', ', ': ')`.
+      sort_keys: If `True`, the output dictionaries will be sorted by key.
 
     Returns:
       A JSON string.
     """
-    return json.dumps(self.values())
+    return json.dumps(
+        self.values(),
+        indent=indent,
+        separators=separators,
+        sort_keys=sort_keys)
 
   def parse_json(self, values_json):
     """Override hyperparameter values, parsing new values from a json object.
@@ -582,11 +614,41 @@ class HParams(object):
     """
     return {n: getattr(self, n) for n in self._hparam_types.keys()}
 
+  def get(self, key, default=None):
+    """Returns the value of `key` if it exists, else `default`."""
+    if key in self._hparam_types:
+      # Ensure that default is compatible with the parameter type.
+      if default is not None:
+        param_type, is_param_list = self._hparam_types[key]
+        type_str = 'list<%s>' % param_type if is_param_list else str(param_type)
+        fail_msg = ("Hparam '%s' of type '%s' is incompatible with "
+                    'default=%s' % (key, type_str, default))
+
+        is_default_list = isinstance(default, list)
+        if is_param_list != is_default_list:
+          raise ValueError(fail_msg)
+
+        try:
+          if is_default_list:
+            for value in default:
+              _cast_to_type_if_compatible(key, param_type, value)
+          else:
+            _cast_to_type_if_compatible(key, param_type, default)
+        except ValueError as e:
+          raise ValueError('%s. %s' % (fail_msg, e))
+
+      return getattr(self, key)
+
+    return default
+
   def __contains__(self, key):
     return key in self._hparam_types
 
   def __str__(self):
     return str(sorted(self.values().items()))
+
+  def __repr__(self):
+    return '%s(%s)' % (type(self).__name__, self.__str__())
 
   @staticmethod
   def _get_kind_name(param_type, is_list):

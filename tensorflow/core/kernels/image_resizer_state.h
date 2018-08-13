@@ -109,8 +109,9 @@ struct ImageResizerState {
     ValidateAndCalculateOutputSize(context, input);
     if (!context->status().ok()) return;
     OP_REQUIRES_OK(context, context->allocate_output(
-                                0, TensorShape({input.dim_size(0), out_height,
-                                                out_width, input.dim_size(3)}),
+                                0,
+                                TensorShape({input.dim_size(0), out_height,
+                                             out_width, input.dim_size(3)}),
                                 &output));
   }
 
@@ -141,7 +142,7 @@ struct ImageResizerGradientState {
     // always be a float.
     OP_REQUIRES(context, input.dtype() == DT_FLOAT,
                 errors::InvalidArgument("input_grad must be of type float",
-                                        input.dtype()));
+                                        DataTypeString(input.dtype())));
 
     OP_REQUIRES(context, original_image.dims() == 4,
                 errors::InvalidArgument("original_image must be 4-dimensional",
@@ -168,8 +169,9 @@ struct ImageResizerGradientState {
         CalculateResizeScale(original_width, resized_width, align_corners_);
     output = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output(
-                                0, TensorShape({batch_size, original_height,
-                                                original_width, channels}),
+                                0,
+                                TensorShape({batch_size, original_height,
+                                             original_width, channels}),
                                 &output));
   }
 

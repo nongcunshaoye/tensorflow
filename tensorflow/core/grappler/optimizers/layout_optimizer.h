@@ -13,10 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_GRAPPLER_OPTIMIZERS_LAYOUT_OPTIMIZER_H_
-#define TENSORFLOW_GRAPPLER_OPTIMIZERS_LAYOUT_OPTIMIZER_H_
+#ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_LAYOUT_OPTIMIZER_H_
+#define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_LAYOUT_OPTIMIZER_H_
 
 #include "tensorflow/core/grappler/costs/graph_properties.h"
+#include "tensorflow/core/grappler/costs/virtual_placer.h"
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
 
 namespace tensorflow {
@@ -28,9 +29,6 @@ class LayoutOptimizer : public GraphOptimizer {
   ~LayoutOptimizer() override {}
 
   string name() const override { return "layout"; };
-
-  // This is for testing only.
-  void set_num_gpus(int num_gpus) { num_gpus_ = num_gpus; };
 
   struct TuningConfig {
     // If true, do not use the NHWC GEMM implementation. When filter size is
@@ -50,13 +48,13 @@ class LayoutOptimizer : public GraphOptimizer {
                 const GraphDef& optimize_output, double result) override;
 
  private:
-  int num_gpus_ = 0;
+  std::unique_ptr<VirtualPlacer> virtual_placer_;
+  std::unordered_set<string> nodes_to_preserve_;
   Status Tune(const GrapplerItem& item, const GraphProperties& graph_properties,
-              const string& default_device, const TuningConfig& config,
-              GraphDef* output);
+              const TuningConfig& config, GraphDef* output);
 };
 
 }  // end namespace grappler
 }  // end namespace tensorflow
 
-#endif  // TENSORFLOW_GRAPPLER_OPTIMIZERS_LAYOUT_OPTIMIZER_H_
+#endif  // TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_LAYOUT_OPTIMIZER_H_

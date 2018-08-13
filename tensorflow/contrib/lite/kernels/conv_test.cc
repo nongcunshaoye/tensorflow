@@ -15,12 +15,25 @@ limitations under the License.
 #include <cstdarg>
 
 #include <gtest/gtest.h>
+#include "absl/memory/memory.h"
 #include "tensorflow/contrib/lite/interpreter.h"
 #include "tensorflow/contrib/lite/kernels/register.h"
 #include "tensorflow/contrib/lite/kernels/test_util.h"
 #include "tensorflow/contrib/lite/model.h"
 
 namespace tflite {
+
+namespace ops {
+namespace builtin {
+
+TfLiteRegistration* Register_CONVOLUTION_REF();
+TfLiteRegistration* Register_CONVOLUTION_GENERIC_OPT();
+TfLiteRegistration* Register_CONVOLUTION_MULTITHREADED_OPT();
+TfLiteRegistration* Register_CONVOLUTION_CBLAS_OPT();
+
+}  // namespace builtin
+}  // namespace ops
+
 namespace {
 
 using ::testing::ElementsAreArray;
@@ -30,10 +43,11 @@ class BaseConvolutionOpModel : public SingleOpModel {
   // TODO(ahentz): Also test different activation types, bias, padding types,
   // stride values.
   BaseConvolutionOpModel(
-      const TensorData& input, const TensorData& filter,
-      const TensorData& output, int stride_width = 2, int stride_height = 2,
-      enum Padding padding = Padding_VALID,
-      enum ActivationFunctionType activation = ActivationFunctionType_NONE) {
+      TfLiteRegistration* registration, const TensorData& input,
+      const TensorData& filter, const TensorData& output, int stride_width = 2,
+      int stride_height = 2, enum Padding padding = Padding_VALID,
+      enum ActivationFunctionType activation = ActivationFunctionType_NONE,
+      int dilation_width_factor = 1, int dilation_height_factor = 1) {
     input_ = AddInput(input);
     filter_ = AddInput(filter);
 
@@ -50,18 +64,15 @@ class BaseConvolutionOpModel : public SingleOpModel {
     }
 
     output_ = AddOutput(output);
-    if (input.type != TensorType_FLOAT32) {
-      // The following is required by quantized inference. It is the unittest's
-      // responsibility to make sure the output scale falls into the correct
-      // range.
-      CHECK_LT(GetScale(input_) * GetScale(filter_), GetScale(output_));
-    }
 
     SetBuiltinOp(BuiltinOperator_CONV_2D, BuiltinOptions_Conv2DOptions,
-                 CreateConv2DOptions(builder_, padding, stride_width,
-                                     stride_height, activation)
+                 CreateConv2DOptions(
+                     builder_, padding, stride_width, stride_height, activation,
+                     dilation_width_factor, dilation_height_factor)
                      .Union());
 
+    resolver_ = absl::make_unique<SingleOpResolver>(BuiltinOperator_CONV_2D,
+                                                    registration);
     BuildInterpreter({GetShape(input_), GetShape(filter_), GetShape(bias_)});
   }
 
@@ -83,12 +94,26 @@ class ConvolutionOpModel : public BaseConvolutionOpModel {
   void SetInput(std::initializer_list<float> data) {
     PopulateTensor(input_, data);
   }
-
   std::vector<float> GetOutput() { return ExtractVector<float>(output_); }
 };
 
-TEST(ConvolutionOpTest, SimpleTestFloat32) {
-  ConvolutionOpModel m({TensorType_FLOAT32, {2, 2, 4, 1}},
+const auto kKernelMap = new std::map<string, TfLiteRegistration*>({
+    {"Reference", ops::builtin::Register_CONVOLUTION_REF()},
+    {"GenericOptimized", ops::builtin::Register_CONVOLUTION_GENERIC_OPT()},
+    {"MultithreadedOptimized",
+     ops::builtin::Register_CONVOLUTION_MULTITHREADED_OPT()},
+    {"CblasOptimized", ops::builtin::Register_CONVOLUTION_CBLAS_OPT()},
+});
+
+class ConvolutionOpTest : public SingleOpTest {
+ protected:
+  const std::map<string, TfLiteRegistration*>& GetKernelMap() override {
+    return *kKernelMap;
+  }
+};
+
+TEST_P(ConvolutionOpTest, SimpleTestFloat32) {
+  ConvolutionOpModel m(GetRegistration(), {TensorType_FLOAT32, {2, 2, 4, 1}},
                        {TensorType_FLOAT32, {3, 2, 2, 1}},
                        {TensorType_FLOAT32, {}});
 
@@ -117,8 +142,8 @@ TEST(ConvolutionOpTest, SimpleTestFloat32) {
                              }));
 }
 
-TEST(ConvolutionOpTest, SimpleTestFloat32WithAnisotropicStrides) {
-  ConvolutionOpModel m({TensorType_FLOAT32, {1, 3, 6, 1}},
+TEST_P(ConvolutionOpTest, SimpleTestFloat32WithAnisotropicStrides) {
+  ConvolutionOpModel m(GetRegistration(), {TensorType_FLOAT32, {1, 3, 6, 1}},
                        {TensorType_FLOAT32, {1, 2, 2, 1}},
                        {TensorType_FLOAT32, {}},
                        /*stride_width=*/3, /*stride_height=*/1);
@@ -139,7 +164,7 @@ TEST(ConvolutionOpTest, SimpleTestFloat32WithAnisotropicStrides) {
                              }));
 }
 
-TEST(ConvolutionOpTest, HandCalculatedFloat32) {
+TEST_P(ConvolutionOpTest, HandCalculatedFloat32) {
   const int depth = 1;
   const int image_width = 4;
   const int image_height = 3;
@@ -150,6 +175,7 @@ TEST(ConvolutionOpTest, HandCalculatedFloat32) {
   const int stride_height = 1;
   const Padding padding = Padding_SAME;
   ConvolutionOpModel m(
+      GetRegistration(),
       {TensorType_FLOAT32,
        {image_batch_count, image_height, image_width, depth}},
       {TensorType_FLOAT32, {depth, filter_size, filter_size, filter_count}},
@@ -192,7 +218,7 @@ TEST(ConvolutionOpTest, HandCalculatedFloat32) {
                                                178, 187, 234, 261, 121}));
 }
 
-TEST(ConvolutionOpTest, HandCalculatedWithBiasFloat32) {
+TEST_P(ConvolutionOpTest, HandCalculatedWithBiasFloat32) {
   const int depth = 1;
   const int image_width = 4;
   const int image_height = 3;
@@ -203,6 +229,7 @@ TEST(ConvolutionOpTest, HandCalculatedWithBiasFloat32) {
   const int stride_height = 1;
   const Padding padding = Padding_SAME;
   ConvolutionOpModel m(
+      GetRegistration(),
       {TensorType_FLOAT32,
        {image_batch_count, image_height, image_width, depth}},
       {TensorType_FLOAT32, {depth, filter_size, filter_size, filter_count}},
@@ -245,7 +272,7 @@ TEST(ConvolutionOpTest, HandCalculatedWithBiasFloat32) {
                                                367, 188, 197, 244, 271, 131}));
 }
 
-TEST(ConvolutionOpTest, HandCalculatedWithReluFloat32) {
+TEST_P(ConvolutionOpTest, HandCalculatedWithReluFloat32) {
   const int depth = 1;
   const int image_width = 4;
   const int image_height = 3;
@@ -256,6 +283,7 @@ TEST(ConvolutionOpTest, HandCalculatedWithReluFloat32) {
   const int stride_height = 1;
   const Padding padding = Padding_SAME;
   ConvolutionOpModel m(
+      GetRegistration(),
       {TensorType_FLOAT32,
        {image_batch_count, image_height, image_width, depth}},
       {TensorType_FLOAT32, {depth, filter_size, filter_size, filter_count}},
@@ -300,7 +328,7 @@ TEST(ConvolutionOpTest, HandCalculatedWithReluFloat32) {
               ElementsAreArray({0, 0, 0, 0, 35, 112, 157, 0, 0, 34, 61, 0}));
 }
 
-TEST(ConvolutionOpTest, HandCalculatedValidFloat32) {
+TEST_P(ConvolutionOpTest, HandCalculatedValidFloat32) {
   const int depth = 1;
   const int image_width = 4;
   const int image_height = 3;
@@ -311,6 +339,7 @@ TEST(ConvolutionOpTest, HandCalculatedValidFloat32) {
   const int stride_height = 1;
   const Padding padding = Padding_VALID;
   ConvolutionOpModel m(
+      GetRegistration(),
       {TensorType_FLOAT32,
        {image_batch_count, image_height, image_width, depth}},
       {TensorType_FLOAT32, {depth, filter_size, filter_size, filter_count}},
@@ -366,8 +395,9 @@ class QuantizedConvolutionOpModel : public BaseConvolutionOpModel {
 
 // In this tests we set the input and output scales so that the results
 // match exactly the 'non-quantized' version.
-TEST(ConvolutionOpTest, SimpleTestQuantized) {
-  QuantizedConvolutionOpModel m({TensorType_UINT8, {2, 2, 4, 1}, -63.5, 64},
+TEST_P(ConvolutionOpTest, SimpleTestQuantized) {
+  QuantizedConvolutionOpModel m(GetRegistration(),
+                                {TensorType_UINT8, {2, 2, 4, 1}, -63.5, 64},
                                 {TensorType_UINT8, {3, 2, 2, 1}, -63.5, 64},
                                 {TensorType_UINT8, {}, -127, 128});
   m.SetInput({
@@ -405,8 +435,47 @@ TEST(ConvolutionOpTest, SimpleTestQuantized) {
                              }));
 }
 
-TEST(ConvolutionOpTest, SimpleTestQuantizedWithAnisotropicStrides) {
-  QuantizedConvolutionOpModel m({TensorType_UINT8, {1, 3, 6, 1}, -63.5, 64},
+TEST_P(ConvolutionOpTest, SimpleTestQuantizedOutputMultiplierGreaterThan1) {
+  // output_multiplier = 1.0118
+  QuantizedConvolutionOpModel quant_op(
+      GetRegistration(), {TensorType_UINT8, {2, 2, 4, 1}, -128.5, 128},
+      {TensorType_UINT8, {3, 2, 2, 1}, -128.5, 128},
+      {TensorType_UINT8, {}, -127, 128});
+  ConvolutionOpModel float_op(
+      GetRegistration(), {TensorType_FLOAT32, {2, 2, 4, 1}},
+      {TensorType_FLOAT32, {3, 2, 2, 1}}, {TensorType_FLOAT32, {}});
+  std::initializer_list<float> input = {
+      // First batch
+      1, 1, 1, 1,  // row = 1
+      2, 2, 2, 2,  // row = 2
+      // Second batch
+      1, 2, 3, 4,  // row = 1
+      1, 2, 3, 4,  // row = 2
+  };
+  std::initializer_list<float> filter = {
+      1,  2,  3,  4,  // first 2x2 filter
+      -1, 1,  -1, 1,  // second 2x2 filter
+      -1, -1, 1,  1,  // third 2x2 filter
+  };
+  std::initializer_list<float> bias = {1, 2, 3};
+
+  quant_op.SetInput(input);
+  quant_op.SetFilter(filter);
+  quant_op.SetBias(bias);
+  quant_op.Invoke();
+
+  float_op.SetInput(input);
+  float_op.SetFilter(filter);
+  float_op.SetBias(bias);
+  float_op.Invoke();
+
+  EXPECT_THAT(quant_op.GetDequantizedOutput(),
+              ElementsAreArray(ArrayFloatNear(float_op.GetOutput(), 1)));
+}
+
+TEST_P(ConvolutionOpTest, SimpleTestQuantizedWithAnisotropicStrides) {
+  QuantizedConvolutionOpModel m(GetRegistration(),
+                                {TensorType_UINT8, {1, 3, 6, 1}, -63.5, 64},
                                 {TensorType_UINT8, {1, 2, 2, 1}, -63.5, 64},
                                 {TensorType_UINT8, {}, -127, 128},
                                 /*stride_width=*/3, /*stride_height=*/1);
@@ -430,11 +499,16 @@ TEST(ConvolutionOpTest, SimpleTestQuantizedWithAnisotropicStrides) {
                                  167, 93,   //
                              }));
 }
+
+INSTANTIATE_TEST_CASE_P(
+    ConvolutionOpTest, ConvolutionOpTest,
+    ::testing::ValuesIn(SingleOpTest::GetKernelTags(*kKernelMap)));
+
 }  // namespace
 }  // namespace tflite
 
 int main(int argc, char** argv) {
-  // On Linux, add: tflite::LogToStderr();
+  ::tflite::LogToStderr();
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

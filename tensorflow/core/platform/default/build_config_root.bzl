@@ -19,6 +19,9 @@ def tf_additional_plugin_deps():
 def tf_additional_xla_deps_py():
   return []
 
+def tf_additional_grpc_deps_py():
+  return []
+
 def tf_additional_license_deps():
   return select({
       str(Label("//tensorflow:with_xla_support")): ["@llvm//:LICENSE.TXT"],
@@ -54,4 +57,10 @@ def if_static(extra_deps, otherwise=[]):
   return select({
       str(Label("//tensorflow:framework_shared_object")): otherwise,
       "//conditions:default": extra_deps,
+  })
+
+def if_dynamic_kernels(extra_deps, otherwise=[]):
+  return select({
+      str(Label("//tensorflow:dynamic_loaded_kernels")): extra_deps,
+      "//conditions:default": otherwise,
   })
